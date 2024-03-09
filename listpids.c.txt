@@ -1,0 +1,88 @@
+#include <linux/init.h>
+#include <linux/kernel.h>
+#include <linux/syscalls.h>
+#include <linux/module.h>
+#include<linux/sched.h>
+#include <linux/slab.h> /*pt. kmalloc*/
+
+SYSCALL_DEFINE1(listpids, pid_t, pr_id) {
+   char comm[TASK_COMM_LEN];
+   char sp[15]="";
+   int plevel, i;
+    struct task_struct *child, *task;
+    struct list_head *list;
+    struct stiva {
+        struct task_struct * task;
+        struct stiva * next;
+        int level; } *q, *tmp; //q=varful stivei tmp=pointer temporar
+    
+    pid_t ppid;
+    struct pid *pid_struct;
+    
+    printk("System call listpids(%ld):\n", pr_id);
+    /*Gasire task cu PID pr_id si preluare in variabila task*/
+    pid_struct = find_get_pid(pr_id);
+    if (pid_struct == NULL) {
+				printk("Process with PID %ld does not exist!\n", pr_id);
+				return 1; 
+		       	}
+    task = pid_task(pid_struct,PIDTYPE_PID);
+    
+    //add task in stiva
+    q = kmalloc(sizeof *q, GFP_KERNEL);
+    if (!q)
+        goto err_aloc;
+
+    q->task = task;
+    q->next = NULL;
+    q->level = 0;
+
+    while (q) {
+        plevel = q->level;
+        task = q->task;
+        //pop din stiva
+        tmp = q;
+        q = q->next;
+        kfree(tmp);
+
+        //preluare PID parinte in ppid folosind rcu synchronization mechanism
+        rcu_read_lock(); /*synchronization mechanism used, where there are several read threads and one write thread, that read/writes the same data, and reading is performed under rcu_read_lock(), and the data are copied for each thread */
+        ppid = rcu_dereference(task->real_parent)->pid; //returns a pointer that can be safely dereferenced by the code
+        rcu_read_unlock();
+        strcpy(sp,"");
+        for(i=1;i<=plevel;i++) strcat(sp," "); if (plevel) strcat(sp,"-");
+        pr_info("%s%-20s State: %ld\tPID: %d\tPPID: %d\tStart_time: %-17ld\tTotaltimeonCPU: %-15ld\tPriority RT_: %ld\tStatic_: %ld\tNormal_: %ld\n",sp,
+            get_task_comm(comm, task),
+            task->__state,
+            task->pid,
+            ppid,
+            task->start_time,
+            task->se.sum_exec_runtime,
+            (long) task->rt_priority,
+            (long) task->static_prio,
+            (long) task->normal_prio
+        );
+
+        list_for_each(list, &task->children) {
+            child = list_entry(list, struct task_struct, sibling);
+            
+            //add child in stiva 
+            tmp = kmalloc(sizeof *tmp, GFP_KERNEL);
+            if (!tmp)
+                goto err_aloc;
+            tmp->task = child;
+            tmp->next = q;
+            tmp->level = plevel + 1;
+            q = tmp;
+        }
+        //In acest moment nodul task are toti copii vizitati (pusi in stiva), deci poate fi sters din stiva
+    }
+    return 0;
+
+err_aloc: //eliberare spatiu alocat pt. stiva
+    while (q) {
+        tmp = q;
+        q = q->next;
+        kfree(tmp);
+    }
+}
